@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useEffect, useState, useMemo } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { Scenario, ForecastResponse, OperationalAdjustmentResponse, AllocationRunResponse } from '../types/api';
 import { StatusBadge } from '../components/StatusBadge';
@@ -14,6 +14,7 @@ import {
 
 export const RunOptimizationPage: React.FC = () => {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
   const [selectedScenarioId, setSelectedScenarioId] = useState<string>('SCN-001');
@@ -21,12 +22,20 @@ export const RunOptimizationPage: React.FC = () => {
   const [forecast, setForecast] = useState<ForecastResponse | null>(null);
   const [selectedIntervalIndex, setSelectedIntervalIndex] = useState<number>(0);
   const [adjustments, setAdjustments] = useState<OperationalAdjustmentResponse[]>([]);
-  const [selectedAdjustmentId, setSelectedAdjustmentId] = useState<string>('');
+  const [selectedAdjustmentId, setSelectedAdjustmentId] = useState<string>(() => searchParams.get('adjustment_id') || '');
 
   const [executing, setExecuting] = useState<boolean>(false);
   const [lastResult, setLastResult] = useState<AllocationRunResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadingInitial, setLoadingInitial] = useState<boolean>(true);
+
+  // Sync adjustment_id from URL query params whenever it changes
+  useEffect(() => {
+    const queryAdjustmentId = searchParams.get('adjustment_id');
+    if (queryAdjustmentId) {
+      setSelectedAdjustmentId(queryAdjustmentId);
+    }
+  }, [searchParams]);
 
   // Load scenarios and adjustments
   useEffect(() => {
@@ -66,9 +75,23 @@ export const RunOptimizationPage: React.FC = () => {
       });
   }, [forecastId]);
 
+  // Group unique intervals for distinct planning interval selection
+  const uniqueIntervals: { start: string; end: string }[] = useMemo(() => {
+    if (!forecast || !forecast.intervals) return [];
+    const seen = new Set<string>();
+    const distinct: { start: string; end: string }[] = [];
+    for (const item of forecast.intervals) {
+      if (!seen.has(item.interval_start)) {
+        seen.add(item.interval_start);
+        distinct.push({ start: item.interval_start, end: item.interval_end });
+      }
+    }
+    return distinct;
+  }, [forecast]);
+
   const handleRunOptimization = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!forecast || forecast.intervals.length === 0) {
+    if (!forecast || uniqueIntervals.length === 0) {
       setError('No valid forecast intervals available to optimize.');
       return;
     }
@@ -78,14 +101,18 @@ export const RunOptimizationPage: React.FC = () => {
       setError(null);
       setLastResult(null);
 
-      // Selected interval boundaries
-      const intervalItem = forecast.intervals[selectedIntervalIndex] || forecast.intervals[0];
+      // Selected interval boundaries from distinct interval list
+      const selectedInterval = uniqueIntervals[selectedIntervalIndex] || uniqueIntervals[0];
+      if (!selectedInterval) {
+        setError('No valid planning interval selected.');
+        return;
+      }
 
       const payload = {
         scenario_id: selectedScenarioId,
         forecast_id: forecastId,
-        interval_start: intervalItem.interval_start,
-        interval_end: intervalItem.interval_end,
+        interval_start: selectedInterval.start,
+        interval_end: selectedInterval.end,
         operational_adjustment_id: selectedAdjustmentId ? selectedAdjustmentId : null,
       };
 
@@ -105,18 +132,6 @@ export const RunOptimizationPage: React.FC = () => {
         <p className="text-sm font-medium">Loading optimization parameters and scenarios...</p>
       </div>
     );
-  }
-
-  // Group unique intervals for selection
-  const uniqueIntervals: { start: string; end: string }[] = [];
-  if (forecast) {
-    const seen = new Set<string>();
-    for (const item of forecast.intervals) {
-      if (!seen.has(item.interval_start)) {
-        seen.add(item.interval_start);
-        uniqueIntervals.push({ start: item.interval_start, end: item.interval_end });
-      }
-    }
   }
 
   return (

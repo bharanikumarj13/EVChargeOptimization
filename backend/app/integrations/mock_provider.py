@@ -115,9 +115,42 @@ class MockForecastProvider(ForecastProviderAdapter):
         if not feedback:
             return None
 
+        # Validate and derive interval index from target_interval_start
+        try:
+            if isinstance(target_interval_start, str):
+                cleaned_str = target_interval_start.replace("Z", "+00:00")
+                start_dt = datetime.fromisoformat(cleaned_str)
+            elif isinstance(target_interval_start, datetime):
+                start_dt = target_interval_start
+            else:
+                raise ValueError("Unsupported timestamp type")
+        except Exception as exc:
+            raise InvalidForecastError(
+                f"Invalid target_interval_start format '{target_interval_start}': {str(exc)}"
+            )
+
+        # Align timezone awareness
+        if start_dt.tzinfo is None and self.base_start_time.tzinfo is not None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+        elif start_dt.tzinfo is not None and self.base_start_time.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=None)
+
+        diff_seconds = (start_dt - self.base_start_time).total_seconds()
+        interval_idx = int(round(diff_seconds / 3600.0))
+
+        # Explicit validation for out-of-horizon timestamps
+        if diff_seconds < -60 or interval_idx < 0 or interval_idx >= 6:
+            raise InvalidForecastError(
+                f"Target interval start '{target_interval_start}' is outside the 6-interval forecast horizon "
+                f"(derived interval index {interval_idx}, horizon start {self.base_start_time.isoformat()})."
+            )
+
         station_outcomes = feedback.get("station_outcomes", [])
         deferred_fraction = feedback.get("deferred_fraction", 0.70)
         forecast_id = feedback.get("forecast_id", "FC-001")
+
+        # Fallback profile for unknown station IDs (6 intervals of 10 arrivals / 200 kWh)
+        default_station_profile = [(10.0, 200.0)] * 6
 
         adjustments = []
         # Next baseline factor
@@ -132,8 +165,12 @@ class MockForecastProvider(ForecastProviderAdapter):
             avg_kwh_per_veh = (pred_energy / pred_veh) if pred_veh > 0 else 25.0
             deferred_kwh = round(deferred_veh * avg_kwh_per_veh, 1)
 
-            # Look up baseline for station at next interval (default interval index 1)
-            base_next_arrivals, base_next_kwh = self.BASE_DEMAND_MATRIX.get(stn_id, [(10.0, 200.0)])[1]
+            # Look up baseline for station at dynamically derived interval index
+            station_profile = self.BASE_DEMAND_MATRIX.get(stn_id, default_station_profile)
+            if 0 <= interval_idx < len(station_profile):
+                base_next_arrivals, base_next_kwh = station_profile[interval_idx]
+            else:
+                base_next_arrivals, base_next_kwh = (10.0, 200.0)
 
             adjustments.append({
                 "station_id": stn_id,

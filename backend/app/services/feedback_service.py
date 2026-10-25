@@ -39,11 +39,101 @@ class FeedbackService:
             else f"IDEMP-{allocation_id}-{deferred_fraction}"
         )
 
-        # 1. Enforce Idempotency: Return existing record if already processed
+        # 1. Enforce Idempotency & Retry logic
         existing = self.feedback_repo.get_by_idempotency_key(idempotency_key)
         if existing:
-            adj = self.adjustment_repo.get_by_source_feedback(existing.feedback_id)
-            return self._build_response(existing, adj.operational_adjustment_id if adj else None)
+            if existing.submission_status == "submitted":
+                # Already succeeded: preserve duplicate prevention, return cached record
+                adj = self.adjustment_repo.get_by_source_feedback(existing.feedback_id)
+                return self._build_response(existing, adj.operational_adjustment_id if adj else None)
+
+            # Previously failed: allow safe retry using the same idempotency key
+            provider = get_forecast_provider()
+            new_retry_count = (existing.retry_count or 0) + 1
+            outcomes_raw = json.loads(existing.station_outcomes_json)
+            payload = {
+                "feedback_id": existing.feedback_id,
+                "scenario_id": existing.scenario_id,
+                "forecast_id": existing.forecast_id,
+                "allocation_id": existing.allocation_id,
+                "outcome_kind": existing.outcome_kind,
+                "interval_start": existing.interval_start.isoformat() if isinstance(existing.interval_start, datetime) else str(existing.interval_start),
+                "interval_end": existing.interval_end.isoformat() if isinstance(existing.interval_end, datetime) else str(existing.interval_end),
+                "deferred_fraction": existing.deferred_fraction,
+                "station_outcomes": outcomes_raw,
+            }
+
+            retry_status = "submitted"
+            retry_error = None
+            try:
+                provider.submit_feedback(payload)
+            except ProviderIntegrationError as pie:
+                retry_status = "failed"
+                retry_error = pie.message
+            except Exception as exc:
+                retry_status = "failed"
+                retry_error = str(exc)
+
+            existing = self.feedback_repo.update_status(
+                record=existing,
+                status=retry_status,
+                retry_count=new_retry_count,
+                error_details=retry_error,
+            )
+
+            adjustment_id: Optional[str] = None
+            if retry_status == "submitted":
+                existing_adj = self.adjustment_repo.get_by_source_feedback(existing.feedback_id)
+                if existing_adj:
+                    adjustment_id = existing_adj.operational_adjustment_id
+                else:
+                    interval_duration = allocation.interval_end - allocation.interval_start
+                    target_start = allocation.interval_end
+                    target_end = target_start + interval_duration
+                    try:
+                        adj_response = provider.get_next_operational_adjustment(
+                            feedback_id=existing.feedback_id,
+                            target_interval_start=target_start.isoformat(),
+                            target_interval_end=target_end.isoformat(),
+                        )
+                    except Exception:
+                        adj_response = None
+
+                    if adj_response:
+                        adjustment_id = f"ADJ-{uuid.uuid4().hex[:8].upper()}"
+                        adj_data = {
+                            "operational_adjustment_id": adjustment_id,
+                            "source_feedback_id": existing.feedback_id,
+                            "parent_forecast_id": allocation.forecast_id,
+                            "target_interval_start": target_start,
+                            "target_interval_end": target_end,
+                            "station_adjustments_json": json.dumps(adj_response.get("station_adjustments", [])),
+                            "deferred_demand_contribution_json": json.dumps([
+                                {
+                                    "station_id": o["station_id"],
+                                    "deferred_vehicles": o.get("deferred_vehicles", 0.0),
+                                    "deferred_energy_kwh": o.get("deferred_energy_kwh", 0.0),
+                                }
+                                for o in outcomes_raw
+                            ]),
+                            "calculation_assumptions_json": json.dumps(adj_response.get("calculation_assumptions", {})),
+                        }
+                        self.adjustment_repo.create(adj_data)
+
+            self.audit_repo.log(
+                event_type="FEEDBACK_RETRIED",
+                entity_type="FeedbackRecord",
+                entity_id=existing.feedback_id,
+                action="RETRY",
+                details={
+                    "status": retry_status,
+                    "retry_count": new_retry_count,
+                    "allocation_id": allocation_id,
+                    "adjustment_id": adjustment_id,
+                },
+            )
+
+            return self._build_response(existing, adjustment_id)
 
         # 2. Extract station outcomes from persisted allocation results
         outcomes: List[StationFeedbackOutcome] = []
@@ -117,11 +207,14 @@ class FeedbackService:
             target_start = allocation.interval_end
             target_end = target_start + interval_duration
 
-            adj_response = provider.get_next_operational_adjustment(
-                feedback_id=feedback_id,
-                target_interval_start=target_start.isoformat(),
-                target_interval_end=target_end.isoformat(),
-            )
+            try:
+                adj_response = provider.get_next_operational_adjustment(
+                    feedback_id=feedback_id,
+                    target_interval_start=target_start.isoformat(),
+                    target_interval_end=target_end.isoformat(),
+                )
+            except Exception:
+                adj_response = None
 
             if adj_response:
                 adjustment_id = f"ADJ-{uuid.uuid4().hex[:8].upper()}"

@@ -75,6 +75,18 @@ def update_station(
                 detail=f"Referenced grid group '{station_in.grid_group_id}' does not exist.",
             )
 
+    effective_count = (
+        station_in.charger_count if station_in.charger_count is not None else station.charger_count
+    )
+    effective_available = (
+        station_in.available_chargers if station_in.available_chargers is not None else station.available_chargers
+    )
+    if effective_available > effective_count:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"available_chargers ({effective_available}) cannot exceed charger_count ({effective_count}).",
+        )
+
     return repo.update(station, station_in)
 
 

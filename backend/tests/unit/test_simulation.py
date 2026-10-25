@@ -5,13 +5,20 @@ from app.simulation.impact import calculate_waiting_time, calculate_utilization,
 def test_calculate_waiting_time():
     # Zero arrivals
     assert calculate_waiting_time(0.0, 10.0, 45.0) == 0.0
+    assert calculate_waiting_time(0.0, 0.0, 45.0) == 0.0
+
+    # Zero available capacity with positive arrivals returns None (unavailable)
+    assert calculate_waiting_time(5.0, 0.0, 45.0) is None
+    assert calculate_waiting_time(10.0, -1.0, 45.0) is None
 
     # Low load (within turnover capacity)
     wait_low = calculate_waiting_time(5.0, 10.0, 40.0)
+    assert wait_low is not None
     assert 0.0 < wait_low < 40.0
 
     # Saturated queue (arrivals > turnover capacity)
     wait_high = calculate_waiting_time(15.0, 10.0, 40.0)
+    assert wait_high is not None
     assert wait_high > wait_low
 
 

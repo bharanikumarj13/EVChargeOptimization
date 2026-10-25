@@ -43,14 +43,13 @@ class FeedbackRepository:
         self,
         record: FeedbackRecord,
         status: str,
-        retry_count: int = None,
-        error_details: str = None,
+        retry_count: Optional[int] = None,
+        error_details: Optional[str] = None,
     ) -> FeedbackRecord:
         record.submission_status = status
         if retry_count is not None:
             record.retry_count = retry_count
-        if error_details is not None:
-            record.error_details = error_details
+        record.error_details = error_details
         self.db.commit()
         self.db.refresh(record)
         return record

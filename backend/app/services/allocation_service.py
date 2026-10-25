@@ -77,14 +77,19 @@ class AllocationService:
                     "predicted_energy_kwh": item["adjusted_predicted_energy_kwh"],
                 }
         else:
-            # Match baseline forecast intervals
-            matching_items = [
-                item for item in forecast.intervals
-                if abs((item.interval_start - req.interval_start).total_seconds()) < 60
-            ]
+            # Match baseline forecast intervals with robust timezone handling
+            req_start = req.interval_start if req.interval_start.tzinfo is not None else req.interval_start.replace(tzinfo=timezone.utc)
+            matching_items = []
+            for item in forecast.intervals:
+                item_start = item.interval_start if item.interval_start.tzinfo is not None else item.interval_start.replace(tzinfo=timezone.utc)
+                if abs((item_start - req_start).total_seconds()) < 60:
+                    matching_items.append(item)
+
             if not matching_items:
-                # If exact timestamp match is offset, map by matching station from available intervals
-                matching_items = forecast.intervals[:len(stations)]
+                raise InvalidForecastError(
+                    f"Requested interval start '{req.interval_start.isoformat()}' is outside the forecast horizon "
+                    f"for forecast '{req.forecast_id}'. Timestamps must match a valid forecast interval."
+                )
 
             for item in matching_items:
                 demand_by_station[item.station_id] = {

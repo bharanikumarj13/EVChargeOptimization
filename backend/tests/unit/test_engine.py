@@ -58,3 +58,51 @@ def test_allocation_inactive_station_gets_zero_power():
     assert results[0]["allocated_power_kw"] == 0.0
     assert results[0]["estimated_served"] == 0.0
     assert results[0]["estimated_unserved"] == 10.0
+
+
+def test_allocation_zero_available_chargers_wait_time_unavailable():
+    gg = GridGroup(grid_group_id="G1", grid_group_name="G1", grid_limit_kw=500.0, other_load_kw=0.0)
+    stn = Station(
+        station_id="STN-ZERO",
+        station_name="Zero Available Station",
+        charger_count=4,
+        available_chargers=0,  # Zero operational chargers
+        charger_power_kw_per_charger=50.0,
+        station_power_limit_kw=200.0,
+        avg_session_minutes=45.0,
+        grid_group_id="G1",
+        is_active=True,
+    )
+    demand = {"STN-ZERO": {"predicted_arrivals": 8.0, "predicted_energy_kwh": 160.0}}
+
+    passed, status, results, warnings = AllocationEngine.optimize([stn], {"G1": gg}, demand, 60)
+    assert passed is True
+    assert results[0]["allocated_power_kw"] == 0.0
+    assert results[0]["estimated_served"] == 0.0
+    assert results[0]["estimated_unserved"] == 8.0
+    assert results[0]["estimated_wait_minutes"] is None
+    assert any("Zero available chargers" in w for w in results[0]["warnings"])
+
+
+def test_allocation_interval_dependent_turnover():
+    gg = GridGroup(grid_group_id="G1", grid_group_name="G1", grid_limit_kw=500.0, other_load_kw=0.0)
+    stn = Station(
+        station_id="STN-TURNOVER",
+        station_name="Turnover Station",
+        charger_count=2,
+        available_chargers=2,
+        charger_power_kw_per_charger=150.0,
+        station_power_limit_kw=300.0,
+        avg_session_minutes=30.0,  # 30 min per session
+        grid_group_id="G1",
+        is_active=True,
+    )
+    demand = {"STN-TURNOVER": {"predicted_arrivals": 10.0, "predicted_energy_kwh": 200.0}}
+
+    # In 60 min: turnover = 60 / 30 = 2 sessions per charger * 2 chargers = 4 vehicles max
+    p60, s60, r60, _ = AllocationEngine.optimize([stn], {"G1": gg}, demand, interval_minutes=60)
+    assert r60[0]["estimated_served"] == 4.0
+
+    # In 30 min: turnover = 30 / 30 = 1 session per charger * 2 chargers = 2 vehicles max
+    p30, s30, r30, _ = AllocationEngine.optimize([stn], {"G1": gg}, demand, interval_minutes=30)
+    assert r30[0]["estimated_served"] == 2.0

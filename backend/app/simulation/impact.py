@@ -5,14 +5,18 @@ def calculate_waiting_time(
     eligible_arrivals: float,
     station_vehicle_capacity: float,
     avg_session_minutes: float,
-) -> float:
+) -> Optional[float]:
     """
     Transparent queue delay estimation (minutes).
     Uses a bounded M/M/c-style delay approximation when within capacity,
     and linear backlog accumulation when arrivals exceed physical station turnover.
+    Returns None when eligible_arrivals > 0 but station_vehicle_capacity <= 0 (unavailable).
     """
-    if eligible_arrivals <= 0 or station_vehicle_capacity <= 0:
+    if eligible_arrivals <= 0:
         return 0.0
+
+    if station_vehicle_capacity <= 0:
+        return None
 
     load_ratio = eligible_arrivals / station_vehicle_capacity
 

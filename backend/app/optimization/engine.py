@@ -112,16 +112,16 @@ class AllocationEngine:
                     "allocated_power_kw": 0.0,
                     "estimated_served_energy_kwh": 0.0,
                     "estimated_unserved_energy_kwh": energy_kwh,
-                    "estimated_wait_minutes": None,
+                    "estimated_wait_minutes": None if arrivals > 0 else 0.0,
                     "charger_utilization_pct": 0.0,
                     "warnings": stn_warnings,
                 })
                 station_allocations[stn.station_id] = {"allocated_power_kw": 0.0}
                 continue
 
-            # Physical turnover capacity
+            # Physical turnover capacity based on actual interval duration
             session_mins = max(stn.avg_session_minutes, 1.0)
-            turnover_per_charger = 60.0 / session_mins
+            turnover_per_charger = interval_minutes / session_mins
             max_phys_capacity = stn.available_chargers * turnover_per_charger
 
             # Energy delivery capacity under allocated power
@@ -156,7 +156,9 @@ class AllocationEngine:
             # Charger utilization
             util_pct = calculate_utilization(feasible_served, session_mins, stn.available_chargers, interval_minutes)
 
-            if unserved > 0:
+            if stn.available_chargers == 0 and arrivals > 0:
+                stn_warnings.append("Zero available chargers: queue wait time is unavailable and demand cannot be served.")
+            elif unserved > 0:
                 stn_warnings.append(f"{unserved} predicted vehicles cannot be served during this interval.")
 
             results.append({

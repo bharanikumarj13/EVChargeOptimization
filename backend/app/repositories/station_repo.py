@@ -27,6 +27,12 @@ class StationRepository:
 
     def update(self, db_obj: Station, obj_in: StationUpdate) -> Station:
         update_data = obj_in.model_dump(exclude_unset=True)
+        effective_count = update_data.get("charger_count", db_obj.charger_count)
+        effective_available = update_data.get("available_chargers", db_obj.available_chargers)
+        if effective_available > effective_count:
+            raise ValueError(
+                f"available_chargers ({effective_available}) cannot exceed charger_count ({effective_count})."
+            )
         for field, value in update_data.items():
             setattr(db_obj, field, value)
         self.db.commit()

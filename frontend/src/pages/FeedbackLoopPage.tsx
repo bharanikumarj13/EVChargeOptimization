@@ -234,7 +234,7 @@ export const FeedbackLoopPage: React.FC = () => {
                       <td className="py-3 px-3 font-semibold text-emerald-400">{totalAdjustedVeh.toFixed(1)} veh</td>
                       <td className="py-3 px-3 text-right">
                         <button
-                          onClick={() => navigate('/optimize')}
+                          onClick={() => navigate(`/optimize?adjustment_id=${encodeURIComponent(adj.operational_adjustment_id)}`)}
                           className="px-3 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 rounded text-xs transition-colors font-medium inline-flex items-center gap-1"
                         >
                           Optimize

@@ -317,7 +317,7 @@ export const AllocationResultsPage: React.FC = () => {
                   <td className="py-3 px-3 font-semibold text-sky-400">{res.allocated_power_kw} kW</td>
                   <td className="py-3 px-3 text-slate-300">{res.estimated_served_energy_kwh} kWh</td>
                   <td className="py-3 px-3 text-slate-300">
-                    {res.estimated_wait_minutes !== null ? `${res.estimated_wait_minutes} min` : 'N/A'}
+                    {res.estimated_wait_minutes != null ? `${res.estimated_wait_minutes} min` : 'N/A'}
                   </td>
                   <td className="py-3 px-3">
                     <span

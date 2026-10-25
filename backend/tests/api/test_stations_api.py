@@ -41,3 +41,22 @@ def test_station_creation_invalid_chargers(client):
     }
     resp = client.post("/api/v1/stations", json=invalid)
     assert resp.status_code == 422
+
+
+def test_station_partial_update_validation(client):
+    # STN-01 has charger_count=8, available_chargers=8
+    # Partial update: increase available_chargers above existing charger_count
+    resp1 = client.put("/api/v1/stations/STN-01", json={"available_chargers": 12})
+    assert resp1.status_code == 422
+    assert "cannot exceed charger_count" in resp1.json()["detail"]
+
+    # Partial update: lower charger_count below existing available_chargers
+    resp2 = client.put("/api/v1/stations/STN-01", json={"charger_count": 4})
+    assert resp2.status_code == 422
+    assert "cannot exceed charger_count" in resp2.json()["detail"]
+
+    # Valid partial update: lower available_chargers safely
+    resp3 = client.put("/api/v1/stations/STN-01", json={"available_chargers": 5})
+    assert resp3.status_code == 200
+    assert resp3.json()["available_chargers"] == 5
+    assert resp3.json()["charger_count"] == 8
