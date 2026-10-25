@@ -1,6 +1,6 @@
 """Add payload_hash and unique constraint on allocation_id in feedback_records
 
-Revision ID: 002_feedback_idempotency_and_fingerprint
+Revision ID: 002_feedback_fingerprint
 Revises: 001_initial_schema
 Create Date: 2026-10-25 22:45:00.000000
 
@@ -9,7 +9,7 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 
-revision: str = "002_feedback_idempotency_and_fingerprint"
+revision: str = "002_feedback_fingerprint"
 down_revision: Union[str, None] = "001_initial_schema"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
