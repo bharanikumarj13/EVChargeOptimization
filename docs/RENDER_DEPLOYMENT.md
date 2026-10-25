@@ -42,8 +42,26 @@ The target production deployment topology on Render comprises:
 
 ---
 
-## 2. Step 1: Create Render PostgreSQL Database
+## 2. Option A: One-Click Render Blueprint Deployment (Recommended)
 
+The repository provides an automated [render.yaml](../render.yaml) Blueprint that sets up the database, backend web service, and frontend static site with correct environment variables and wiring in one operation:
+
+1. Connect your GitHub repository to Render.
+2. In the Render Dashboard, click **Blueprints** → **New Blueprint Instance**.
+3. Select your `EVChargeOptimization` repository.
+4. Render will detect `render.yaml` and prompt you to create:
+   - `evcharge-opt-db` (PostgreSQL Database)
+   - `evcharge-opt-api` (FastAPI Web Service)
+   - `evcharge-opt` (React Static Site)
+5. Click **Apply**. Render will automatically provision the managed database, build the frontend, run database migrations, seed baseline data, and start the services.
+
+---
+
+## 3. Option B: Manual Dashboard Configuration
+
+If configuring services manually via the Render UI:
+
+### Step 1: Create Render PostgreSQL Database
 1. In the Render Dashboard, click **New +** → **PostgreSQL**.
 2. Settings:
    - **Name:** `evcharge-opt-db`
@@ -55,7 +73,7 @@ The target production deployment topology on Render comprises:
 
 ---
 
-## 3. Step 2: Deploy Backend Web Service
+### Step 2: Deploy Backend Web Service
 
 1. Click **New +** → **Web Service**.
 2. Connect your repository.
@@ -67,28 +85,31 @@ The target production deployment topology on Render comprises:
    - **Runtime:** `Python 3`
    - **Build Command:**
      ```bash
-     pip install --upgrade pip && pip install -r backend/requirements.txt && cd backend && alembic upgrade head && python scripts/seed_data.py
+     pip install --upgrade pip && pip install -r backend/requirements.txt
      ```
    - **Start Command:**
      ```bash
-     uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port ${PORT:-8002}
+     bash backend/scripts/start_production.sh
      ```
    - **Health Check Path:** `/healthz`
 
 4. Environment Variables:
    | Key | Value | Description |
    | :--- | :--- | :--- |
+   | `PYTHON_VERSION` | `3.12.7` | Explicit Python 3.12 runtime |
    | `APP_ENV` | `production` | Production environment flag |
    | `DATABASE_URL` | *(Paste Internal Database URL from Step 1)* | Managed PostgreSQL connection |
-   | `PREDICT_PROVIDER_MODE` | `mock` *(or `live` when partner ready)* | Forecast mode |
-   | `PREDICT_API_BASE_URL` | `https://evcharge-predict.onrender.com` | Base URL of partner service |
-   | `PREDICT_SERVICE_TOKEN` | *(Secret token shared with partner)* | Secret Bearer authentication token |
-   | `CORS_ORIGINS` | `https://evcharge-opt.onrender.com` | Allowed frontend origin |
+   | `PREDICT_PROVIDER_MODE` | `mock` | Forecast mode (keep mock until live partner verified) |
+   | `PREDICT_API_BASE_URL` | `http://127.0.0.1:8001` | Placeholder partner URL (unverified until partner confirms) |
+   | `CORS_ORIGINS` | `https://evcharge-opt.onrender.com,http://127.0.0.1:5174,http://localhost:5174` | Allowed frontend origins |
    | `LOG_LEVEL` | `INFO` | Logging level |
+   | `STATION_INTEGRATION_PROFILE` | `five_station_mock` | Active station profile |
+   | `CONFIRM_PHYSICAL_STATION_MAPPINGS` | `false` | Physical verification guard |
+   | `PREDICT_SUPPORTED_STATIONS` | `ST-001,ST-002,ST-003` | Supported canonical predictor stations |
 
 ---
 
-## 4. Step 3: Deploy Frontend Static Site
+### Step 3: Deploy Frontend Static Site
 
 1. Click **New +** → **Static Site**.
 2. Connect your repository.

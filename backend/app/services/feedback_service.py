@@ -1,8 +1,10 @@
 import uuid
 import json
+import hashlib
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from app.models.feedback import FeedbackRecord
 from app.models.operational_adjustment import OperationalAdjustment
@@ -11,7 +13,7 @@ from app.repositories.feedback_repo import FeedbackRepository
 from app.repositories.operational_adjustment_repo import OperationalAdjustmentRepository
 from app.repositories.audit_repo import AuditRepository
 from app.integrations import get_forecast_provider
-from app.core.exceptions import EntityNotFoundError, ProviderIntegrationError
+from app.core.exceptions import EntityNotFoundError, ProviderIntegrationError, IdempotencyConflictError
 from app.schemas.feedback import FeedbackCreateRequest, FeedbackResponse, StationFeedbackOutcome
 
 
@@ -22,6 +24,36 @@ class FeedbackService:
         self.feedback_repo = FeedbackRepository(db)
         self.adjustment_repo = OperationalAdjustmentRepository(db)
         self.audit_repo = AuditRepository(db)
+
+    @staticmethod
+    def compute_payload_fingerprint(
+        allocation_id: str,
+        deferred_fraction: float,
+        outcomes: List[StationFeedbackOutcome],
+    ) -> str:
+        """
+        Computes a deterministic SHA-256 fingerprint over normalized request components.
+        Enforces Rule 5 for detecting conflicting submissions under identical keys.
+        """
+        normalized_outcomes = [
+            {
+                "station_id": o.station_id,
+                "predicted_arrivals": round(float(o.predicted_arrivals), 4),
+                "estimated_served": round(float(o.estimated_served), 4),
+                "estimated_unserved": round(float(o.estimated_unserved), 4),
+                "allocated_power_kw": round(float(o.allocated_power_kw), 4),
+                "deferred_vehicles": round(float(o.deferred_vehicles), 4),
+                "deferred_energy_kwh": round(float(o.deferred_energy_kwh), 4),
+            }
+            for o in sorted(outcomes, key=lambda x: x.station_id)
+        ]
+        canonical_dict = {
+            "allocation_id": allocation_id,
+            "deferred_fraction": round(float(deferred_fraction), 4),
+            "station_outcomes": normalized_outcomes,
+        }
+        canonical_json = json.dumps(canonical_dict, sort_keys=True)
+        return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
     def submit_allocation_feedback(
         self,
@@ -39,15 +71,53 @@ class FeedbackService:
             else f"IDEMP-{allocation_id}-{deferred_fraction}"
         )
 
-        # 1. Enforce Idempotency & Retry logic
+        # Extract current station outcomes from persisted allocation results
+        outcomes: List[StationFeedbackOutcome] = []
+        for res in allocation.results:
+            def_veh = round(res.estimated_unserved * deferred_fraction, 1)
+            def_kwh = round(res.estimated_unserved_energy_kwh * deferred_fraction, 1)
+            outcomes.append(
+                StationFeedbackOutcome(
+                    station_id=res.station_id,
+                    predicted_arrivals=res.predicted_arrivals,
+                    estimated_served=res.estimated_served,
+                    estimated_unserved=res.estimated_unserved,
+                    allocated_power_kw=res.allocated_power_kw,
+                    estimated_wait_minutes=res.estimated_wait_minutes,
+                    charger_utilization_pct=res.charger_utilization_pct,
+                    deferred_vehicles=def_veh,
+                    deferred_energy_kwh=def_kwh,
+                )
+            )
+
+        payload_hash = self.compute_payload_fingerprint(allocation_id, deferred_fraction, outcomes)
+
+        # Rule 4: One feedback submission permitted per allocation run
+        existing_by_alloc = self.feedback_repo.get_by_allocation_id(allocation_id)
+        if existing_by_alloc:
+            if existing_by_alloc.idempotency_key != idempotency_key:
+                raise IdempotencyConflictError(
+                    f"Feedback has already been submitted for allocation run '{allocation_id}' with idempotency key "
+                    f"'{existing_by_alloc.idempotency_key}'. Only one feedback submission is permitted per allocation run.",
+                    idempotency_key=idempotency_key,
+                )
+
+        # Rule 1, 2, 3: Enforce Idempotency & Conflict logic via key lookup
         existing = self.feedback_repo.get_by_idempotency_key(idempotency_key)
         if existing:
+            # Rule 3: Conflicting payload with the same idempotency key
+            if existing.allocation_id != allocation_id or (existing.payload_hash and existing.payload_hash != payload_hash):
+                raise IdempotencyConflictError(
+                    f"Idempotency key '{idempotency_key}' was previously used for a different request payload or allocation run.",
+                    idempotency_key=idempotency_key,
+                )
+
+            # Rule 1: Identical retry of already succeeded submission -> return cached record
             if existing.submission_status == "submitted":
-                # Already succeeded: preserve duplicate prevention, return cached record
                 adj = self.adjustment_repo.get_by_source_feedback(existing.feedback_id)
                 return self._build_response(existing, adj.operational_adjustment_id if adj else None)
 
-            # Previously failed: allow safe retry using the same idempotency key
+            # Rule 2: Previously failed submission -> allow safe retry using the same idempotency key
             provider = get_forecast_provider()
             new_retry_count = (existing.retry_count or 0) + 1
             outcomes_raw = json.loads(existing.station_outcomes_json)
@@ -95,6 +165,7 @@ class FeedbackService:
                             feedback_id=existing.feedback_id,
                             target_interval_start=target_start.isoformat(),
                             target_interval_end=target_end.isoformat(),
+                            forecast_id=existing.forecast_id,
                         )
                     except Exception:
                         adj_response = None
@@ -135,25 +206,7 @@ class FeedbackService:
 
             return self._build_response(existing, adjustment_id)
 
-        # 2. Extract station outcomes from persisted allocation results
-        outcomes: List[StationFeedbackOutcome] = []
-        for res in allocation.results:
-            def_veh = round(res.estimated_unserved * deferred_fraction, 1)
-            def_kwh = round(res.estimated_unserved_energy_kwh * deferred_fraction, 1)
-            outcomes.append(
-                StationFeedbackOutcome(
-                    station_id=res.station_id,
-                    predicted_arrivals=res.predicted_arrivals,
-                    estimated_served=res.estimated_served,
-                    estimated_unserved=res.estimated_unserved,
-                    allocated_power_kw=res.allocated_power_kw,
-                    estimated_wait_minutes=res.estimated_wait_minutes,
-                    charger_utilization_pct=res.charger_utilization_pct,
-                    deferred_vehicles=def_veh,
-                    deferred_energy_kwh=def_kwh,
-                )
-            )
-
+        # 3. New submission workflow
         feedback_id = f"FBD-{uuid.uuid4().hex[:8].upper()}"
         payload = {
             "feedback_id": feedback_id,
@@ -167,7 +220,6 @@ class FeedbackService:
             "station_outcomes": [o.model_dump() for o in outcomes],
         }
 
-        # 3. Submit feedback to provider adapter
         provider = get_forecast_provider()
         submission_status = "submitted"
         error_details = None
@@ -181,7 +233,7 @@ class FeedbackService:
             submission_status = "failed"
             error_details = str(exc)
 
-        # 4. Persist feedback record
+        # 4. Persist feedback record with payload_hash
         record_data = {
             "feedback_id": feedback_id,
             "scenario_id": allocation.scenario_id,
@@ -194,11 +246,24 @@ class FeedbackService:
             "deferred_fraction": deferred_fraction,
             "submission_status": submission_status,
             "idempotency_key": idempotency_key,
+            "payload_hash": payload_hash,
             "retry_count": 0,
             "error_details": error_details,
         }
 
-        feedback_obj = self.feedback_repo.create(record_data)
+        try:
+            feedback_obj = self.feedback_repo.create(record_data)
+        except IntegrityError:
+            self.db.rollback()
+            # Concurrently created by a competing request
+            existing_after_race = self.feedback_repo.get_by_idempotency_key(idempotency_key)
+            if existing_after_race:
+                adj = self.adjustment_repo.get_by_source_feedback(existing_after_race.feedback_id)
+                return self._build_response(existing_after_race, adj.operational_adjustment_id if adj else None)
+            raise IdempotencyConflictError(
+                f"Concurrent feedback submission conflict for allocation run '{allocation_id}'.",
+                idempotency_key=idempotency_key,
+            )
 
         # 5. If successfully submitted, calculate / retrieve operational demand adjustment for next interval
         adjustment_id: Optional[str] = None
@@ -212,6 +277,7 @@ class FeedbackService:
                     feedback_id=feedback_id,
                     target_interval_start=target_start.isoformat(),
                     target_interval_end=target_end.isoformat(),
+                    forecast_id=allocation.forecast_id,
                 )
             except Exception:
                 adj_response = None

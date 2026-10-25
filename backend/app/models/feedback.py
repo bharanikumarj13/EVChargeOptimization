@@ -13,6 +13,8 @@ class FeedbackRecord(Base):
     allocation_id: Mapped[str] = mapped_column(
         String(64),
         ForeignKey("allocation_runs.allocation_id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
         nullable=False,
     )
     outcome_kind: Mapped[str] = mapped_column(String(32), default="simulation", nullable=False)
@@ -22,6 +24,7 @@ class FeedbackRecord(Base):
     deferred_fraction: Mapped[float] = mapped_column(Float, default=0.70, nullable=False)
     submission_status: Mapped[str] = mapped_column(String(32), default="submitted", nullable=False)  # submitted, pending, failed
     idempotency_key: Mapped[str] = mapped_column(String(128), unique=True, index=True, nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_details: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

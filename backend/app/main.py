@@ -68,3 +68,8 @@ def root():
         "api_v1": settings.API_V1_PREFIX,
         "mode": settings.PREDICT_PROVIDER_MODE,
     }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app.main:app", host=settings.APP_HOST, port=settings.APP_PORT, reload=True)

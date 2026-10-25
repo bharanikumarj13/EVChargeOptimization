@@ -1,0 +1,71 @@
+# ==============================================================================
+# Render Infrastructure Blueprint Specification — EVCharge-Opt
+# ==============================================================================
+# Deploys:
+#   1. Managed PostgreSQL Database (evcharge-opt-db)
+#   2. FastAPI Optimization Backend Web Service (evcharge-opt-api)
+#   3. React / Vite Operator Dashboard Static Site (evcharge-opt)
+# Reference: https://render.com/docs/blueprint-spec
+# ==============================================================================
+
+databases:
+  - name: evcharge-opt-db
+    databaseName: evcharge_opt
+    user: evcharge_user
+    plan: free
+
+services:
+  # ----------------------------------------------------------------------------
+  # 1. FastAPI Optimization Backend Web Service
+  # ----------------------------------------------------------------------------
+  - type: web
+    name: evcharge-opt-api
+    runtime: python
+    plan: free
+    buildCommand: pip install --upgrade pip && pip install -r backend/requirements.txt
+    startCommand: bash backend/scripts/start_production.sh
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: evcharge-opt-db
+          property: connectionString
+      - key: PREDICT_PROVIDER_MODE
+        value: mock
+      # NOTE: Partner EVCharge-Predict service is unverified for live production.
+      # Retain mock mode; placeholder URL prevents unintended outbound network attempts.
+      - key: PREDICT_API_BASE_URL
+        value: http://127.0.0.1:8001
+      - key: CORS_ORIGINS
+        value: https://evcharge-opt.onrender.com,http://127.0.0.1:5174,http://localhost:5174
+      - key: LOG_LEVEL
+        value: INFO
+      - key: STATION_INTEGRATION_PROFILE
+        value: five_station_mock
+      - key: CONFIRM_PHYSICAL_STATION_MAPPINGS
+        value: "false"
+      - key: PREDICT_SUPPORTED_STATIONS
+        value: "ST-001,ST-002,ST-003"
+
+  # ----------------------------------------------------------------------------
+  # 2. React / Vite Operator Dashboard Static Site
+  # ----------------------------------------------------------------------------
+  # Note: Render Blueprint specification uses 'type: web' with 'runtime: static'
+  # and 'staticPublishPath' for Static Site services.
+  - type: web
+    name: evcharge-opt
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: ./dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_BASE_URL
+        value: https://evcharge-opt-api.onrender.com

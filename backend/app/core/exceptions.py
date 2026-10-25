@@ -51,3 +51,12 @@ class IdempotencyConflictError(EVChargeOptException):
             status_code=409,
             details={"idempotency_key": idempotency_key},
         )
+
+
+class StationMappingError(EVChargeOptException):
+    def __init__(self, message: str, station_id: str = None):
+        super().__init__(
+            message=message,
+            status_code=422,
+            details={"station_id": station_id} if station_id else {},
+        )

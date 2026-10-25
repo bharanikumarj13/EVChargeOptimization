@@ -2,7 +2,14 @@ import httpx
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 from app.integrations.base import ForecastProviderAdapter
-from app.schemas.forecast import ForecastResponse, ForecastIntervalItem
+from app.schemas.forecast import (
+    ForecastResponse,
+    ForecastIntervalItem,
+    ForecastCreateRequest,
+    ForecastAcknowledgement,
+    validate_forecast_horizon_integrity,
+)
+from app.integrations.station_mapper import StationMapper
 from app.core.config import settings
 from app.core.exceptions import ProviderIntegrationError, EntityNotFoundError
 
@@ -33,6 +40,69 @@ class LiveForecastProvider(ForecastProviderAdapter):
         if self.service_token:
             headers["Authorization"] = f"Bearer {self.service_token}"
         return headers
+
+    def create_forecast(self, req: ForecastCreateRequest) -> ForecastAcknowledgement:
+        """
+        Requests baseline forecast generation from EVCharge-Predict (POST /api/v1/forecasts).
+        Enforces predictor 3-station support, validates acknowledgement (accepting 'completed' or 'generated'),
+        and confirms forecast retrieval and 6-interval horizon integrity.
+        """
+        url = f"{self.base_url}/api/v1/forecasts"
+        # Map internal station IDs to canonical predictor IDs, rejecting unsupported stations like ST-004 / ST-005
+        mapped_stations = [
+            StationMapper.to_external(s, validate_predictor_support=True)
+            for s in req.station_ids
+        ]
+
+        payload = {
+            "scenario_id": req.scenario_id,
+            "station_ids": mapped_stations,
+            "forecast_start": req.forecast_start.isoformat(),
+            "interval_minutes": req.interval_minutes,
+            "horizon_intervals": req.horizon_intervals,
+        }
+
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                response = client.post(url, headers=self._get_headers(), json=payload)
+                if response.status_code >= 500:
+                    raise ProviderIntegrationError(
+                        f"Predictor service error during forecast creation: HTTP {response.status_code}",
+                        is_retryable=True,
+                    )
+                if response.status_code not in (200, 201, 202):
+                    raise ProviderIntegrationError(
+                        f"Predictor rejected baseline forecast creation: HTTP {response.status_code}",
+                        is_retryable=False,
+                    )
+
+                data = response.json()
+                ack = ForecastAcknowledgement.model_validate(data)
+
+                # Validate acknowledgement status: partner contract specifies 'completed', 'generated', or 'ready'
+                if ack.status.lower() not in ("completed", "generated", "ready", "success"):
+                    raise ProviderIntegrationError(
+                        f"Predictor returned non-successful forecast status: '{ack.status}'",
+                        is_retryable=False,
+                    )
+
+                # Immediately verify retrieval and horizon integrity
+                forecast_data = self.get_forecast(ack.forecast_id, req.scenario_id)
+                validate_forecast_horizon_integrity(
+                    forecast_data.intervals,
+                    expected_horizon_intervals=req.horizon_intervals,
+                    expected_interval_minutes=req.interval_minutes,
+                    expected_station_ids=mapped_stations,
+                )
+
+                self._last_successful_request = datetime.now(timezone.utc).isoformat()
+                return ack
+
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            raise ProviderIntegrationError(
+                f"Predictor service connection failure during forecast creation: {exc.__class__.__name__}",
+                is_retryable=True,
+            ) from exc
 
     def get_forecast(self, forecast_id: str, scenario_id: Optional[str] = None) -> ForecastResponse:
         url = f"{self.base_url}/api/v1/forecasts/{forecast_id}"
@@ -70,42 +140,38 @@ class LiveForecastProvider(ForecastProviderAdapter):
             ) from exc
 
     def submit_feedback(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        url = f"{self.base_url}/api/v1/feedback"
-        try:
-            with httpx.Client(timeout=self.timeout) as client:
-                response = client.post(url, headers=self._get_headers(), json=payload)
-                if response.status_code >= 500:
-                    raise ProviderIntegrationError(
-                        f"Predictor service error during feedback submission: HTTP {response.status_code}",
-                        is_retryable=True,
-                    )
-                if response.status_code not in (200, 201, 202):
-                    raise ProviderIntegrationError(
-                        f"Predictor rejected feedback submission: HTTP {response.status_code}",
-                        is_retryable=False,
-                    )
-
-                self._last_successful_request = datetime.now(timezone.utc).isoformat()
-                return response.json()
-
-        except (httpx.ConnectError, httpx.TimeoutException) as exc:
-            raise ProviderIntegrationError(
-                f"Predictor service network error during feedback: {exc.__class__.__name__}",
-                is_retryable=True,
-            ) from exc
+        """
+        External Phase 5 feedback endpoint and authentication have not yet been confirmed
+        by the EVCharge-Predict partner contract. Fails explicitly with ProviderIntegrationError
+        in live mode instead of sending to an unconfirmed endpoint.
+        """
+        raise ProviderIntegrationError(
+            "External Phase 5 feedback endpoint and authentication are not yet confirmed by the "
+            "EVCharge-Predict partner contract. Live external submission is suspended pending partner "
+            "contract confirmation. Local feedback persistence remains active.",
+            is_retryable=False,
+        )
 
     def get_next_operational_adjustment(
         self,
         feedback_id: str,
         target_interval_start: str,
         target_interval_end: str,
+        forecast_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        url = f"{self.base_url}/api/v1/operational-adjustments"
-        params = {
-            "source_feedback_id": feedback_id,
-            "target_interval_start": target_interval_start,
-            "target_interval_end": target_interval_end,
-        }
+        """
+        Retrieves adjusted demand from the documented predictor endpoint:
+        GET /api/v1/forecasts/{forecast_id}/adjusted-demand?feedback_id={feedback_id}
+        """
+        if not forecast_id:
+            raise ProviderIntegrationError(
+                "forecast_id is required to fetch adjusted demand from predictor.",
+                is_retryable=False,
+            )
+
+        url = f"{self.base_url}/api/v1/forecasts/{forecast_id}/adjusted-demand"
+        params = {"feedback_id": feedback_id}
+
         try:
             with httpx.Client(timeout=self.timeout) as client:
                 response = client.get(url, headers=self._get_headers(), params=params)
@@ -113,16 +179,17 @@ class LiveForecastProvider(ForecastProviderAdapter):
                     return None
                 if response.status_code != 200:
                     raise ProviderIntegrationError(
-                        f"Predictor error retrieving adjustment: HTTP {response.status_code}",
+                        f"Predictor error retrieving adjusted demand: HTTP {response.status_code}",
                         is_retryable=True,
                     )
 
                 self._last_successful_request = datetime.now(timezone.utc).isoformat()
+                # Partner response schema pending confirmation; return raw payload
                 return response.json()
 
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise ProviderIntegrationError(
-                f"Predictor service network error retrieving adjustment: {exc.__class__.__name__}",
+                f"Predictor service network error retrieving adjusted demand: {exc.__class__.__name__}",
                 is_retryable=True,
             ) from exc
 

@@ -1,8 +1,10 @@
+import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, List
 from app.integrations.base import ForecastProviderAdapter
-from app.schemas.forecast import ForecastIntervalItem, ForecastResponse
-from app.core.exceptions import EntityNotFoundError, InvalidForecastError
+from app.schemas.forecast import ForecastIntervalItem, ForecastResponse, ForecastCreateRequest, ForecastAcknowledgement
+from app.integrations.station_mapper import StationMapper
+from app.core.exceptions import EntityNotFoundError, InvalidForecastError, StationMappingError
 
 
 class MockForecastProvider(ForecastProviderAdapter):
@@ -40,6 +42,87 @@ class MockForecastProvider(ForecastProviderAdapter):
             self.base_start_time = base_start_time
         self._last_successful_request: Optional[str] = None
         self._submitted_feedback: Dict[str, Dict[str, Any]] = {}
+        self._created_forecasts: Dict[str, ForecastResponse] = {}
+
+    def create_forecast(self, req: ForecastCreateRequest) -> ForecastAcknowledgement:
+        """
+        Creates a deterministic baseline forecast for requested stations and horizon,
+        storing it for immediate subsequent retrieval via get_forecast.
+        """
+        now = datetime.now(timezone.utc)
+        forecast_id = f"FC-MOCK-{uuid.uuid4().hex[:6].upper()}"
+
+        active_stations = StationMapper.get_profile_stations()
+
+        # Validate all requested stations against profile and mapping
+        mapped_stations = []
+        for station_id in req.station_ids:
+            try:
+                int_stn = StationMapper.to_internal(station_id)
+            except Exception as e:
+                raise StationMappingError(
+                    f"Station '{station_id}' is not mapped to any known internal station.",
+                    station_id=station_id,
+                ) from e
+            if int_stn not in active_stations:
+                raise StationMappingError(
+                    f"Station '{station_id}' (internal: '{int_stn}') is not supported under active profile "
+                    f"'{StationMapper.get_profile()}'. Supported stations: {active_stations}",
+                    station_id=station_id,
+                )
+            mapped_stations.append((station_id, int_stn))
+
+        intervals: List[ForecastIntervalItem] = []
+        gen_time = req.forecast_start - timedelta(hours=1)
+
+        # Standard station fallback profiles
+        default_profile = [(10.0, 200.0), (14.0, 280.0), (12.0, 240.0), (11.0, 220.0), (15.0, 310.0), (13.0, 270.0)]
+
+        for interval_idx in range(req.horizon_intervals):
+            int_start = req.forecast_start + timedelta(minutes=interval_idx * req.interval_minutes)
+            int_end = int_start + timedelta(minutes=req.interval_minutes)
+
+            for station_id, int_stn in mapped_stations:
+                profile = self.BASE_DEMAND_MATRIX.get(int_stn, default_profile)
+                base_arrivals, base_energy = profile[interval_idx % len(profile)]
+
+                item = ForecastIntervalItem(
+                    forecast_id=forecast_id,
+                    scenario_id=req.scenario_id,
+                    station_id=int_stn,
+                    interval_start=int_start,
+                    interval_end=int_end,
+                    interval_minutes=req.interval_minutes,
+                    predicted_arrivals=float(base_arrivals),
+                    predicted_energy_kwh=float(base_energy),
+                    model_version="mock-v1.0",
+                    generated_at=gen_time,
+                )
+                intervals.append(item)
+
+        stored_resp = ForecastResponse(
+            forecast_id=forecast_id,
+            scenario_id=req.scenario_id,
+            model_version="mock-v1.0",
+            generated_at=gen_time,
+            intervals=intervals,
+            interval_count=len(intervals),
+            station_ids=[int_stn for _, int_stn in mapped_stations],
+        )
+        self._created_forecasts[forecast_id] = stored_resp
+        self._last_successful_request = now.isoformat()
+
+        return ForecastAcknowledgement(
+            contract_version="1.0",
+            forecast_id=forecast_id,
+            scenario_id=req.scenario_id,
+            status="generated",
+            demand_type="baseline",
+            generated_at=now,
+            interval_minutes=req.interval_minutes,
+            horizon_intervals=req.horizon_intervals,
+            forecast_url=f"/api/v1/forecasts/{forecast_id}",
+        )
 
     def get_forecast(self, forecast_id: str, scenario_id: Optional[str] = None) -> ForecastResponse:
         """Returns deterministic 6-interval forecast for the requested ID."""
@@ -48,18 +131,24 @@ class MockForecastProvider(ForecastProviderAdapter):
         if forecast_id == "FC-INVALID":
             raise InvalidForecastError("Forecast format corrupted or missing mandatory fields")
 
+        if forecast_id in self._created_forecasts:
+            self._last_successful_request = datetime.now(timezone.utc).isoformat()
+            return self._created_forecasts[forecast_id]
+
         # Stable pseudo-variation based on hash of forecast_id
         hash_factor = (sum(ord(c) for c in forecast_id) % 10) / 100.0  # +/- 0% to 9%
 
         intervals: List[ForecastIntervalItem] = []
         gen_time = self.base_start_time - timedelta(hours=2)
+        active_stations = StationMapper.get_profile_stations()
 
         for interval_idx in range(6):
             int_start = self.base_start_time + timedelta(hours=interval_idx)
             int_end = int_start + timedelta(hours=1)
 
-            for station_id in self.MOCK_STATIONS:
-                base_arrivals, base_energy = self.BASE_DEMAND_MATRIX[station_id][interval_idx]
+            for station_id in active_stations:
+                profile = self.BASE_DEMAND_MATRIX.get(station_id, [(10.0, 200.0)] * 6)
+                base_arrivals, base_energy = profile[interval_idx % len(profile)]
                 arrivals = round(base_arrivals * (1.0 + hash_factor), 1)
                 energy = round(base_energy * (1.0 + hash_factor), 1)
 
@@ -86,7 +175,7 @@ class MockForecastProvider(ForecastProviderAdapter):
             generated_at=gen_time,
             intervals=intervals,
             interval_count=len(intervals),
-            station_ids=self.MOCK_STATIONS,
+            station_ids=active_stations,
         )
 
     def submit_feedback(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -106,6 +195,7 @@ class MockForecastProvider(ForecastProviderAdapter):
         feedback_id: str,
         target_interval_start: str,
         target_interval_end: str,
+        forecast_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Calculates authoritative adjusted operational demand by combining subsequent baseline
@@ -129,25 +219,31 @@ class MockForecastProvider(ForecastProviderAdapter):
                 f"Invalid target_interval_start format '{target_interval_start}': {str(exc)}"
             )
 
+        forecast_id = feedback.get("forecast_id")
+        base_start = self.base_start_time
+        if forecast_id and forecast_id in self._created_forecasts:
+            created_fc = self._created_forecasts[forecast_id]
+            if created_fc.intervals:
+                base_start = created_fc.intervals[0].interval_start
+
         # Align timezone awareness
-        if start_dt.tzinfo is None and self.base_start_time.tzinfo is not None:
+        if start_dt.tzinfo is None and base_start.tzinfo is not None:
             start_dt = start_dt.replace(tzinfo=timezone.utc)
-        elif start_dt.tzinfo is not None and self.base_start_time.tzinfo is None:
+        elif start_dt.tzinfo is not None and base_start.tzinfo is None:
             start_dt = start_dt.replace(tzinfo=None)
 
-        diff_seconds = (start_dt - self.base_start_time).total_seconds()
+        diff_seconds = (start_dt - base_start).total_seconds()
         interval_idx = int(round(diff_seconds / 3600.0))
 
         # Explicit validation for out-of-horizon timestamps
         if diff_seconds < -60 or interval_idx < 0 or interval_idx >= 6:
             raise InvalidForecastError(
                 f"Target interval start '{target_interval_start}' is outside the 6-interval forecast horizon "
-                f"(derived interval index {interval_idx}, horizon start {self.base_start_time.isoformat()})."
+                f"(derived interval index {interval_idx}, horizon start {base_start.isoformat()})."
             )
 
         station_outcomes = feedback.get("station_outcomes", [])
         deferred_fraction = feedback.get("deferred_fraction", 0.70)
-        forecast_id = feedback.get("forecast_id", "FC-001")
 
         # Fallback profile for unknown station IDs (6 intervals of 10 arrivals / 200 kWh)
         default_station_profile = [(10.0, 200.0)] * 6
@@ -165,12 +261,22 @@ class MockForecastProvider(ForecastProviderAdapter):
             avg_kwh_per_veh = (pred_energy / pred_veh) if pred_veh > 0 else 25.0
             deferred_kwh = round(deferred_veh * avg_kwh_per_veh, 1)
 
-            # Look up baseline for station at dynamically derived interval index
-            station_profile = self.BASE_DEMAND_MATRIX.get(stn_id, default_station_profile)
-            if 0 <= interval_idx < len(station_profile):
-                base_next_arrivals, base_next_kwh = station_profile[interval_idx]
-            else:
-                base_next_arrivals, base_next_kwh = (10.0, 200.0)
+            # Look up baseline from created forecast if available, else matrix
+            base_next_arrivals = None
+            base_next_kwh = None
+            if forecast_id and forecast_id in self._created_forecasts:
+                for it in self._created_forecasts[forecast_id].intervals:
+                    if it.station_id == stn_id and abs((it.interval_start - start_dt).total_seconds()) < 60:
+                        base_next_arrivals = it.predicted_arrivals
+                        base_next_kwh = it.predicted_energy_kwh
+                        break
+
+            if base_next_arrivals is None:
+                station_profile = self.BASE_DEMAND_MATRIX.get(stn_id, default_station_profile)
+                if 0 <= interval_idx < len(station_profile):
+                    base_next_arrivals, base_next_kwh = station_profile[interval_idx]
+                else:
+                    base_next_arrivals, base_next_kwh = (10.0, 200.0)
 
             adjustments.append({
                 "station_id": stn_id,

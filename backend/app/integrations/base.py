@@ -1,10 +1,15 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
-from app.schemas.forecast import ForecastResponse
+from app.schemas.forecast import ForecastResponse, ForecastCreateRequest, ForecastAcknowledgement
 
 
 class ForecastProviderAdapter(ABC):
     """Abstract interface defining operations with the EVCharge-Predict service."""
+
+    @abstractmethod
+    def create_forecast(self, req: ForecastCreateRequest) -> ForecastAcknowledgement:
+        """Request generation of a new baseline forecast from the prediction service."""
+        pass
 
     @abstractmethod
     def get_forecast(self, forecast_id: str, scenario_id: Optional[str] = None) -> ForecastResponse:
@@ -22,6 +27,7 @@ class ForecastProviderAdapter(ABC):
         feedback_id: str,
         target_interval_start: str,
         target_interval_end: str,
+        forecast_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Retrieve operational demand adjustment for the subsequent interval."""
         pass

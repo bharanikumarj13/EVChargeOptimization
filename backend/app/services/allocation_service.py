@@ -15,8 +15,10 @@ from app.repositories.allocation_repo import AllocationRepository
 from app.repositories.forecast_snapshot_repo import ForecastSnapshotRepository
 from app.repositories.audit_repo import AuditRepository
 from app.integrations import get_forecast_provider
+from app.integrations.station_mapper import StationMapper
 from app.optimization.engine import AllocationEngine
-from app.core.exceptions import EntityNotFoundError, InvalidForecastError
+from app.core.config import settings
+from app.core.exceptions import EntityNotFoundError, InvalidForecastError, StationMappingError
 from app.schemas.allocation import AllocationRunRequest, AllocationRunResponse, StationAllocationResultSchema
 
 
@@ -59,6 +61,11 @@ class AllocationService:
         # Check if an operational adjustment was supplied (feedback-adjusted demand)
         demand_by_station: Dict[str, Dict[str, float]] = {}
         target_interval_start_iso = req.interval_start.isoformat()
+        known_station_ids = {s.station_id for s in stations}
+
+        # Enforce physical verification safeguard in live mode
+        is_live_mode = (scenario.provider_mode == "live" or not settings.is_mock_provider)
+        require_physical_confirmed = is_live_mode and not getattr(settings, "CONFIRM_PHYSICAL_STATION_MAPPINGS", False)
 
         if req.operational_adjustment_id:
             adj = (
@@ -72,7 +79,12 @@ class AllocationService:
             # Use feedback-adjusted operational demand numbers
             adj_data = json.loads(adj.station_adjustments_json)
             for item in adj_data:
-                demand_by_station[item["station_id"]] = {
+                internal_stn_id = StationMapper.to_internal(
+                    item["station_id"],
+                    known_internal_ids=known_station_ids,
+                    require_physical_confirmed=require_physical_confirmed,
+                )
+                demand_by_station[internal_stn_id] = {
                     "predicted_arrivals": item["adjusted_predicted_arrivals"],
                     "predicted_energy_kwh": item["adjusted_predicted_energy_kwh"],
                 }
@@ -92,23 +104,44 @@ class AllocationService:
                 )
 
             for item in matching_items:
-                demand_by_station[item.station_id] = {
+                internal_stn_id = StationMapper.to_internal(
+                    item.station_id,
+                    known_internal_ids=known_station_ids,
+                    require_physical_confirmed=require_physical_confirmed,
+                )
+                demand_by_station[internal_stn_id] = {
                     "predicted_arrivals": item.predicted_arrivals,
                     "predicted_energy_kwh": item.predicted_energy_kwh,
                 }
 
-        # Fill any missing stations with zero demand
-        for stn in stations:
-            if stn.station_id not in demand_by_station:
+        # Filter station scope based on the active station integration profile
+        profile_station_ids = set(StationMapper.get_profile_stations())
+        scoped_stations = [s for s in stations if s.station_id in profile_station_ids]
+
+        # Validate that all active stations within the profile scope have forecast demand
+        missing_active = [
+            stn.station_id for stn in scoped_stations
+            if stn.is_active and stn.station_id not in demand_by_station
+        ]
+        if missing_active:
+            raise InvalidForecastError(
+                f"Active station(s) {missing_active} have no forecast demand for interval '{req.interval_start.isoformat()}'. "
+                f"Forecast must provide demand for all active stations in the active profile.",
+                validation_errors=[{"missing_stations": missing_active}],
+            )
+
+        # Inactive stations get zero demand
+        for stn in scoped_stations:
+            if not stn.is_active and stn.station_id not in demand_by_station:
                 demand_by_station[stn.station_id] = {"predicted_arrivals": 0.0, "predicted_energy_kwh": 0.0}
 
-        # 5. Run deterministic optimization engine
+        # 5. Run deterministic optimization engine on scoped stations
         interval_minutes = int((req.interval_end - req.interval_start).total_seconds() / 60.0)
         if interval_minutes <= 0:
             interval_minutes = 60
 
         passed, status, station_results, warnings = AllocationEngine.optimize(
-            stations=stations,
+            stations=scoped_stations,
             grid_groups=grid_groups,
             demand_by_station=demand_by_station,
             interval_minutes=interval_minutes,

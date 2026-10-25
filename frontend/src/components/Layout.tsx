@@ -11,6 +11,7 @@ import {
   ExternalLink,
   ShieldCheck,
 } from 'lucide-react';
+import { API_BASE_URL } from '../services/api';
 
 const navItems = [
   { to: '/', label: 'Overview', icon: LayoutDashboard },
@@ -80,7 +81,7 @@ export const Layout: React.FC = () => {
             <span className="text-[10px] text-slate-400">v0.1.0</span>
           </div>
           <a
-            href="http://127.0.0.1:8002/docs"
+            href={`${API_BASE_URL}/docs`}
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center justify-between text-slate-400 hover:text-emerald-400 transition-colors pt-1"
@@ -102,10 +103,10 @@ export const Layout: React.FC = () => {
           <div className="flex items-center gap-4 text-xs text-slate-400">
             <span className="flex items-center gap-1.5">
               <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-              Backend: 127.0.0.1:8002
+              Backend: {API_BASE_URL.replace(/^https?:\/\//, '')}
             </span>
             <span className="text-slate-600">|</span>
-            <span>Frontend: 127.0.0.1:5174</span>
+            <span>Frontend: {typeof window !== 'undefined' && window.location.host ? window.location.host : '127.0.0.1:5174'}</span>
           </div>
         </header>
 

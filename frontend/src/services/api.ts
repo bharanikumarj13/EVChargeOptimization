@@ -15,7 +15,7 @@ import {
   IntegrationHealthResponse,
 } from '../types/api';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8002';
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8002';
 
 async function handleResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
@@ -201,6 +201,31 @@ export const api = {
   },
 
   // Forecasts
+  async createForecast(req: {
+    scenario_id: string;
+    station_ids: string[];
+    forecast_start: string;
+    interval_minutes?: number;
+    horizon_intervals?: number;
+  }): Promise<{
+    contract_version: string;
+    forecast_id: string;
+    scenario_id: string;
+    status: string;
+    demand_type: string;
+    generated_at: string;
+    interval_minutes: number;
+    horizon_intervals: number;
+    forecast_url: string;
+  }> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/forecasts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+    });
+    return handleResponse(res);
+  },
+
   async getForecast(forecastId: string, scenarioId?: string): Promise<ForecastResponse> {
     const url = scenarioId
       ? `${API_BASE_URL}/api/v1/forecasts/${forecastId}?scenario_id=${scenarioId}`

@@ -52,6 +52,20 @@ class Settings(BaseSettings):
         description="Portion of unserved demand assumed to defer to the next interval",
     )
 
+    # Station Integration Profile & Physical Verification
+    STATION_INTEGRATION_PROFILE: str = Field(
+        default="five_station_mock",
+        description="Active station profile: 'five_station_mock' (all 5 local stations) or 'three_station_integration' (initial 3-station predictor profile)",
+    )
+    CONFIRM_PHYSICAL_STATION_MAPPINGS: bool = Field(
+        default=False,
+        description="Explicit confirmation flag for physical correspondence of proposed candidate station mappings (STN-01..03 -> ST-001..003)",
+    )
+    PREDICT_SUPPORTED_STATIONS: str = Field(
+        default="ST-001,ST-002,ST-003",
+        description="Comma-separated list of canonical station identifiers supported by the EVCharge-Predict model",
+    )
+
     model_config = SettingsConfigDict(
         env_file=(".env", "../.env"),
         env_file_encoding="utf-8",
@@ -61,6 +75,10 @@ class Settings(BaseSettings):
     @property
     def cors_origins_list(self) -> List[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+
+    @property
+    def predict_supported_stations_list(self) -> List[str]:
+        return [stn.strip() for stn in self.PREDICT_SUPPORTED_STATIONS.split(",") if stn.strip()]
 
     @property
     def is_mock_provider(self) -> bool:

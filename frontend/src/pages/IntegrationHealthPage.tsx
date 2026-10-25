@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { api } from '../services/api';
+import { api, API_BASE_URL } from '../services/api';
 import { HealthResponse, IntegrationHealthResponse } from '../types/api';
 import { StatusBadge } from '../components/StatusBadge';
 import {
@@ -99,9 +99,9 @@ export const IntegrationHealthPage: React.FC = () => {
               <span className="font-semibold text-emerald-400 capitalize">{health?.database || 'healthy'}</span>
             </div>
             <div className="flex items-center justify-between py-2">
-              <span className="text-slate-400">Local API Docs</span>
+              <span className="text-slate-400">API Documentation</span>
               <a
-                href="http://127.0.0.1:8002/docs"
+                href={`${API_BASE_URL}/docs`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-emerald-400 hover:text-emerald-300 flex items-center gap-1"
