@@ -55,6 +55,84 @@ def test_forecast_interval_negative_arrivals():
         )
 
 
+def test_forecast_interval_item_naive_and_non_utc_rejected():
+    # Naive datetime
+    with pytest.raises(ValidationError) as exc1:
+        ForecastIntervalItem(
+            forecast_id="FC-001",
+            station_id="STN-01",
+            interval_start=datetime(2026, 10, 26, 8, 0, 0),  # Naive
+            interval_end=datetime(2026, 10, 26, 9, 0, 0),
+            interval_minutes=60,
+            predicted_arrivals=5.0,
+            predicted_energy_kwh=100.0,
+            generated_at=datetime(2026, 10, 26, 6, 0, 0, tzinfo=timezone.utc),
+        )
+    assert "timezone-aware UTC" in str(exc1.value)
+
+    # Non-UTC timezone (+05:30)
+    ist = timezone(timedelta(hours=5, minutes=30))
+    with pytest.raises(ValidationError) as exc2:
+        ForecastIntervalItem(
+            forecast_id="FC-001",
+            station_id="STN-01",
+            interval_start=datetime(2026, 10, 26, 8, 0, 0, tzinfo=ist),
+            interval_end=datetime(2026, 10, 26, 9, 0, 0, tzinfo=ist),
+            interval_minutes=60,
+            predicted_arrivals=5.0,
+            predicted_energy_kwh=100.0,
+            generated_at=datetime(2026, 10, 26, 6, 0, 0, tzinfo=timezone.utc),
+        )
+    assert "must have UTC timezone" in str(exc2.value)
+
+
+def test_forecast_interval_read_contract_schema():
+    from app.schemas.forecast import ForecastIntervalRead
+
+    # Contract integer arrival with valid UTC
+    read_item = ForecastIntervalRead(
+        interval_start=datetime(2026, 10, 26, 12, 0, 0, tzinfo=timezone.utc),
+        interval_end=datetime(2026, 10, 26, 13, 0, 0, tzinfo=timezone.utc),
+        predicted_arrivals=3,  # Integer
+        predicted_energy_kwh=45.5,
+    )
+    assert read_item.predicted_arrivals == 3
+    assert float(read_item.predicted_arrivals) == 3.0
+
+    # Naive timestamp rejected
+    with pytest.raises(ValidationError):
+        ForecastIntervalRead(
+            interval_start=datetime(2026, 10, 26, 12, 0, 0),
+            interval_end=datetime(2026, 10, 26, 13, 0, 0),
+            predicted_arrivals=3,
+            predicted_energy_kwh=45.5,
+        )
+
+
+def test_validate_forecast_horizon_integrity_top_of_hour():
+    from app.schemas.forecast import validate_forecast_horizon_integrity
+    from app.core.exceptions import InvalidForecastError
+
+    # Start time at minute 15 (not top of hour)
+    base_start = datetime(2026, 10, 26, 8, 15, 0, tzinfo=timezone.utc)
+    items = [
+        ForecastIntervalItem(
+            forecast_id="FC-001",
+            station_id="STN-01",
+            interval_start=base_start + timedelta(hours=i),
+            interval_end=base_start + timedelta(hours=i + 1),
+            interval_minutes=60,
+            predicted_arrivals=5.0,
+            predicted_energy_kwh=100.0,
+            generated_at=base_start - timedelta(hours=1),
+        )
+        for i in range(6)
+    ]
+    with pytest.raises(InvalidForecastError) as exc_info:
+        validate_forecast_horizon_integrity(items, expected_horizon_intervals=6, expected_interval_minutes=60)
+    assert "must be aligned to top of the hour" in exc_info.value.message
+
+
 def test_mock_provider_dynamic_adjustment_indexing():
     from app.integrations.mock_provider import MockForecastProvider
     from app.core.exceptions import InvalidForecastError

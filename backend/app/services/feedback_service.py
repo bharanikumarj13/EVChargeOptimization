@@ -13,6 +13,8 @@ from app.repositories.feedback_repo import FeedbackRepository
 from app.repositories.operational_adjustment_repo import OperationalAdjustmentRepository
 from app.repositories.audit_repo import AuditRepository
 from app.integrations import get_forecast_provider
+from app.integrations.live_provider import LiveForecastProvider
+from app.core.logging import logger
 from app.core.exceptions import EntityNotFoundError, ProviderIntegrationError, IdempotencyConflictError
 from app.schemas.feedback import FeedbackCreateRequest, FeedbackResponse, StationFeedbackOutcome
 
@@ -24,6 +26,50 @@ class FeedbackService:
         self.feedback_repo = FeedbackRepository(db)
         self.adjustment_repo = OperationalAdjustmentRepository(db)
         self.audit_repo = AuditRepository(db)
+
+    def resolve_remote_feedback_id(self, local_feedback_id: str) -> Optional[str]:
+        """
+        Durable remote feedback ID resolution across server restarts.
+        Checks:
+        1. OperationalAdjustment.calculation_assumptions_json
+        2. AuditEvent.details_json for event_type in ('FEEDBACK_SUBMITTED', 'FEEDBACK_RETRIED')
+        3. LiveForecastProvider class-level cache
+        """
+        # 1. Check existing OperationalAdjustment
+        adj = self.adjustment_repo.get_by_source_feedback(local_feedback_id)
+        if adj and adj.calculation_assumptions_json:
+            try:
+                assumptions = json.loads(adj.calculation_assumptions_json)
+                if assumptions.get("remote_feedback_id"):
+                    remote_id = assumptions["remote_feedback_id"]
+                    LiveForecastProvider.register_feedback_mapping(local_feedback_id, remote_id)
+                    return remote_id
+            except Exception:
+                pass
+
+        # 2. Check AuditEvent table
+        from app.models.audit_event import AuditEvent
+        audit_rec = (
+            self.db.query(AuditEvent)
+            .filter(
+                AuditEvent.entity_type == "FeedbackRecord",
+                AuditEvent.entity_id == local_feedback_id,
+            )
+            .order_by(AuditEvent.id.desc())
+            .first()
+        )
+        if audit_rec and audit_rec.details_json:
+            try:
+                details = json.loads(audit_rec.details_json)
+                if details.get("remote_feedback_id"):
+                    remote_id = details["remote_feedback_id"]
+                    LiveForecastProvider.register_feedback_mapping(local_feedback_id, remote_id)
+                    return remote_id
+            except Exception:
+                pass
+
+        # 3. Fallback to in-memory map
+        return LiveForecastProvider._class_local_to_remote_feedback_ids.get(local_feedback_id)
 
     @staticmethod
     def compute_payload_fingerprint(
@@ -115,6 +161,50 @@ class FeedbackService:
             # Rule 1: Identical retry of already succeeded submission -> return cached record
             if existing.submission_status == "submitted":
                 adj = self.adjustment_repo.get_by_source_feedback(existing.feedback_id)
+                if not adj:
+                    provider = get_forecast_provider()
+                    target_feedback_id = self.resolve_remote_feedback_id(existing.feedback_id) or existing.feedback_id
+                    interval_duration = allocation.interval_end - allocation.interval_start
+                    target_start = allocation.interval_end
+                    target_end = target_start + interval_duration
+                    adj_response = None
+                    try:
+                        adj_response = provider.get_next_operational_adjustment(
+                            feedback_id=target_feedback_id,
+                            target_interval_start=target_start.isoformat(),
+                            target_interval_end=target_end.isoformat(),
+                            forecast_id=existing.forecast_id,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to retrieve operational adjustment during identical retry for %s: %s",
+                            existing.feedback_id,
+                            exc,
+                        )
+                    if adj_response:
+                        adjustment_id = f"ADJ-{uuid.uuid4().hex[:8].upper()}"
+                        assumptions = adj_response.get("calculation_assumptions", {}) or {}
+                        remote_fid = self.resolve_remote_feedback_id(existing.feedback_id)
+                        if remote_fid:
+                            assumptions["remote_feedback_id"] = remote_fid
+                        adj_data = {
+                            "operational_adjustment_id": adjustment_id,
+                            "source_feedback_id": existing.feedback_id,
+                            "parent_forecast_id": allocation.forecast_id,
+                            "target_interval_start": target_start,
+                            "target_interval_end": target_end,
+                            "station_adjustments_json": json.dumps(adj_response.get("station_adjustments", [])),
+                            "deferred_demand_contribution_json": json.dumps([
+                                {
+                                    "station_id": o.station_id,
+                                    "deferred_vehicles": o.deferred_vehicles,
+                                    "deferred_energy_kwh": o.deferred_energy_kwh,
+                                }
+                                for o in outcomes
+                            ]),
+                            "calculation_assumptions_json": json.dumps(assumptions),
+                        }
+                        adj = self.adjustment_repo.create(adj_data)
                 return self._build_response(existing, adj.operational_adjustment_id if adj else None)
 
             # Rule 2: Previously failed submission -> allow safe retry using the same idempotency key
@@ -135,8 +225,13 @@ class FeedbackService:
 
             retry_status = "submitted"
             retry_error = None
+            remote_feedback_id = None
             try:
-                provider.submit_feedback(payload)
+                feedback_result = provider.submit_feedback(payload)
+                if isinstance(feedback_result, dict):
+                    remote_feedback_id = feedback_result.get("remote_feedback_id") or feedback_result.get("feedback_id")
+            except IdempotencyConflictError:
+                raise
             except ProviderIntegrationError as pie:
                 retry_status = "failed"
                 retry_error = pie.message
@@ -152,6 +247,7 @@ class FeedbackService:
             )
 
             adjustment_id: Optional[str] = None
+            adjustment_error: Optional[str] = None
             if retry_status == "submitted":
                 existing_adj = self.adjustment_repo.get_by_source_feedback(existing.feedback_id)
                 if existing_adj:
@@ -160,18 +256,29 @@ class FeedbackService:
                     interval_duration = allocation.interval_end - allocation.interval_start
                     target_start = allocation.interval_end
                     target_end = target_start + interval_duration
+                    target_feedback_id = remote_feedback_id or self.resolve_remote_feedback_id(existing.feedback_id) or existing.feedback_id
                     try:
                         adj_response = provider.get_next_operational_adjustment(
-                            feedback_id=existing.feedback_id,
+                            feedback_id=target_feedback_id,
                             target_interval_start=target_start.isoformat(),
                             target_interval_end=target_end.isoformat(),
                             forecast_id=existing.forecast_id,
                         )
-                    except Exception:
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to retrieve operational adjustment for retried feedback %s: %s",
+                            existing.feedback_id,
+                            exc,
+                        )
+                        adjustment_error = f"{exc.__class__.__name__}: {str(exc)}"
                         adj_response = None
 
                     if adj_response:
                         adjustment_id = f"ADJ-{uuid.uuid4().hex[:8].upper()}"
+                        assumptions = adj_response.get("calculation_assumptions", {}) or {}
+                        resolved_remote = remote_feedback_id or self.resolve_remote_feedback_id(existing.feedback_id)
+                        if resolved_remote:
+                            assumptions["remote_feedback_id"] = resolved_remote
                         adj_data = {
                             "operational_adjustment_id": adjustment_id,
                             "source_feedback_id": existing.feedback_id,
@@ -187,7 +294,7 @@ class FeedbackService:
                                 }
                                 for o in outcomes_raw
                             ]),
-                            "calculation_assumptions_json": json.dumps(adj_response.get("calculation_assumptions", {})),
+                            "calculation_assumptions_json": json.dumps(assumptions),
                         }
                         self.adjustment_repo.create(adj_data)
 
@@ -201,6 +308,8 @@ class FeedbackService:
                     "retry_count": new_retry_count,
                     "allocation_id": allocation_id,
                     "adjustment_id": adjustment_id,
+                    "remote_feedback_id": remote_feedback_id or self.resolve_remote_feedback_id(existing.feedback_id),
+                    "adjustment_error": adjustment_error,
                 },
             )
 
@@ -223,9 +332,14 @@ class FeedbackService:
         provider = get_forecast_provider()
         submission_status = "submitted"
         error_details = None
+        remote_feedback_id = None
 
         try:
-            provider.submit_feedback(payload)
+            feedback_result = provider.submit_feedback(payload)
+            if isinstance(feedback_result, dict):
+                remote_feedback_id = feedback_result.get("remote_feedback_id") or feedback_result.get("feedback_id")
+        except IdempotencyConflictError:
+            raise
         except ProviderIntegrationError as pie:
             submission_status = "failed"
             error_details = pie.message
@@ -267,23 +381,34 @@ class FeedbackService:
 
         # 5. If successfully submitted, calculate / retrieve operational demand adjustment for next interval
         adjustment_id: Optional[str] = None
+        adjustment_error: Optional[str] = None
         if submission_status == "submitted":
             interval_duration = allocation.interval_end - allocation.interval_start
             target_start = allocation.interval_end
             target_end = target_start + interval_duration
 
+            target_feedback_id = remote_feedback_id or feedback_id
             try:
                 adj_response = provider.get_next_operational_adjustment(
-                    feedback_id=feedback_id,
+                    feedback_id=target_feedback_id,
                     target_interval_start=target_start.isoformat(),
                     target_interval_end=target_end.isoformat(),
                     forecast_id=allocation.forecast_id,
                 )
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "Failed to retrieve operational adjustment for feedback %s: %s",
+                    feedback_id,
+                    exc,
+                )
+                adjustment_error = f"{exc.__class__.__name__}: {str(exc)}"
                 adj_response = None
 
             if adj_response:
                 adjustment_id = f"ADJ-{uuid.uuid4().hex[:8].upper()}"
+                assumptions = adj_response.get("calculation_assumptions", {}) or {}
+                if remote_feedback_id:
+                    assumptions["remote_feedback_id"] = remote_feedback_id
                 adj_data = {
                     "operational_adjustment_id": adjustment_id,
                     "source_feedback_id": feedback_id,
@@ -299,7 +424,7 @@ class FeedbackService:
                         }
                         for o in outcomes
                     ]),
-                    "calculation_assumptions_json": json.dumps(adj_response.get("calculation_assumptions", {})),
+                    "calculation_assumptions_json": json.dumps(assumptions),
                 }
                 self.adjustment_repo.create(adj_data)
 
@@ -313,6 +438,8 @@ class FeedbackService:
                 "status": submission_status,
                 "allocation_id": allocation_id,
                 "adjustment_id": adjustment_id,
+                "remote_feedback_id": remote_feedback_id,
+                "adjustment_error": adjustment_error,
             },
         )
 
