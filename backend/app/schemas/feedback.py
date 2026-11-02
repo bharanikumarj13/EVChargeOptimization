@@ -9,6 +9,9 @@ class StationFeedbackOutcome(BaseModel):
     estimated_served: float
     estimated_unserved: float
     allocated_power_kw: float
+    allocated_energy_kwh: Optional[float] = None
+    available_capacity_kw: Optional[float] = None
+    reported_unmet_demand_kwh: Optional[float] = None
     estimated_wait_minutes: Optional[float] = None
     charger_utilization_pct: float
     deferred_vehicles: float

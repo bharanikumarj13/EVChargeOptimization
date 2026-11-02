@@ -621,12 +621,12 @@ def test_simulated_e2e_integration_workflow(three_station_context, monkeypatch):
         "interval_end": (base_start + timedelta(hours=1)).isoformat(),
         "station_outcomes": [
             {
-                "station_id": r.station_id,
-                "allocated_energy_kwh": r.estimated_served_energy_kwh,
-                "available_capacity_kw": r.allocated_power_kw,
-                "reported_unmet_demand_kwh": r.estimated_unserved_energy_kwh,
+                "station_id": o.station_id,
+                "allocated_energy_kwh": o.allocated_energy_kwh,
+                "available_capacity_kw": o.available_capacity_kw,
+                "reported_unmet_demand_kwh": o.reported_unmet_demand_kwh,
             }
-            for r in alloc_1.results
+            for o in fb_res.station_outcomes
         ],
     }
     retry_ack = live_provider.submit_feedback(raw_payload_retry)

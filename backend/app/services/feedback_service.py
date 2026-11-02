@@ -12,6 +12,7 @@ from app.repositories.allocation_repo import AllocationRepository
 from app.repositories.feedback_repo import FeedbackRepository
 from app.repositories.operational_adjustment_repo import OperationalAdjustmentRepository
 from app.repositories.audit_repo import AuditRepository
+from app.repositories.station_repo import StationRepository
 from app.integrations import get_forecast_provider
 from app.integrations.live_provider import LiveForecastProvider
 from app.core.logging import logger
@@ -26,6 +27,7 @@ class FeedbackService:
         self.feedback_repo = FeedbackRepository(db)
         self.adjustment_repo = OperationalAdjustmentRepository(db)
         self.audit_repo = AuditRepository(db)
+        self.station_repo = StationRepository(db)
 
     def resolve_remote_feedback_id(self, local_feedback_id: str) -> Optional[str]:
         """
@@ -122,13 +124,28 @@ class FeedbackService:
         for res in allocation.results:
             def_veh = round(res.estimated_unserved * deferred_fraction, 1)
             def_kwh = round(res.estimated_unserved_energy_kwh * deferred_fraction, 1)
+
+            # Available charger capacity before allocation represents the operational active power
+            # limit of the station (min of station_power_limit_kw and total charger capacity).
+            station = self.station_repo.get_by_id(res.station_id)
+            if station and station.is_active:
+                stn_capacity = min(
+                    float(station.station_power_limit_kw),
+                    float(station.available_chargers * station.charger_power_kw_per_charger),
+                )
+            else:
+                stn_capacity = float(res.allocated_power_kw)
+
             outcomes.append(
                 StationFeedbackOutcome(
                     station_id=res.station_id,
                     predicted_arrivals=res.predicted_arrivals,
                     estimated_served=res.estimated_served,
                     estimated_unserved=res.estimated_unserved,
-                    allocated_power_kw=res.allocated_power_kw,
+                    allocated_power_kw=round(float(res.allocated_power_kw), 2),
+                    allocated_energy_kwh=round(float(res.estimated_served_energy_kwh), 2),
+                    available_capacity_kw=round(float(stn_capacity), 2),
+                    reported_unmet_demand_kwh=round(float(res.estimated_unserved_energy_kwh), 2),
                     estimated_wait_minutes=res.estimated_wait_minutes,
                     charger_utilization_pct=res.charger_utilization_pct,
                     deferred_vehicles=def_veh,

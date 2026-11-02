@@ -159,6 +159,7 @@ class ExternalPhase5FeedbackPayload(BaseModel):
 def map_allocation_to_external_phase5(
     allocation_run: Any,
     station_results: List[Any],
+    station_capacities: Optional[Dict[str, float]] = None,
 ) -> List[ExternalPhase5FeedbackPayload]:
     """
     Maps local allocation simulation results into EVCharge-Predict Phase 5 feedback contract items.
@@ -171,6 +172,16 @@ def map_allocation_to_external_phase5(
     for res in station_results:
         canonical_station_id = StationMapper.to_external(res.station_id)
 
+        # Determine station available capacity: check explicitly passed capacity, result attribute, or fallback
+        if station_capacities and res.station_id in station_capacities:
+            cap_kw = station_capacities[res.station_id]
+        elif hasattr(res, "station_capacity_kw") and type(res.station_capacity_kw) in (int, float):
+            cap_kw = res.station_capacity_kw
+        elif hasattr(res, "available_capacity_kw") and type(res.available_capacity_kw) in (int, float):
+            cap_kw = res.available_capacity_kw
+        else:
+            cap_kw = res.allocated_power_kw
+
         # Distinguish energy (kWh) from power (kW) and vehicle arrivals (integer counts)
         item = ExternalPhase5FeedbackPayload(
             contract_version="1.0",
@@ -179,7 +190,7 @@ def map_allocation_to_external_phase5(
             interval_start=allocation_run.interval_start,
             interval_end=allocation_run.interval_end,
             allocated_energy_kwh=round(float(res.estimated_served_energy_kwh), 2),
-            available_capacity_kw=round(float(res.allocated_power_kw), 2),
+            available_capacity_kw=round(float(cap_kw), 2),
             reported_unmet_demand_kwh=round(float(res.estimated_unserved_energy_kwh), 2),
         )
         mapped_payloads.append(item)

@@ -33,6 +33,18 @@ class Settings(BaseSettings):
         default=None,
         description="Backend-to-backend authentication token for EVCharge-Predict",
     )
+    OPT_SERVICE_TOKEN: Optional[str] = Field(
+        default=None,
+        description="Dedicated server-to-server inbound authentication token expected from EVCharge-Predict",
+    )
+    OPT_CLIENT_TOKEN: Optional[str] = Field(
+        default=None,
+        description="Optional client token for authenticated browser / UI access",
+    )
+    ENFORCE_INBOUND_AUTH: bool = Field(
+        default=False,
+        description="When True, enforces authentication even in non-production environments",
+    )
     PREDICT_TIMEOUT_SECONDS: float = Field(
         default=10.0,
         description="HTTP request timeout for live provider adapter",

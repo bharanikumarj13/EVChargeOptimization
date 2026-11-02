@@ -110,6 +110,11 @@ class LiveForecastProvider(ForecastProviderAdapter):
         try:
             with httpx.Client(timeout=self.timeout) as client:
                 response = client.post(url, headers=self._get_headers(), json=payload)
+                if response.status_code in (401, 403):
+                    raise ProviderIntegrationError(
+                        f"Predictor authentication failure (HTTP {response.status_code}): {response.text}",
+                        is_retryable=False,
+                    )
                 if response.status_code >= 500:
                     raise ProviderIntegrationError(
                         f"Predictor service error during forecast creation: HTTP {response.status_code}",
@@ -162,6 +167,12 @@ class LiveForecastProvider(ForecastProviderAdapter):
 
                 if response.status_code == 404:
                     raise EntityNotFoundError("Remote Forecast", forecast_id)
+
+                if response.status_code in (401, 403):
+                    raise ProviderIntegrationError(
+                        f"Predictor authentication failure (HTTP {response.status_code}): {response.text}",
+                        is_retryable=False,
+                    )
 
                 if response.status_code >= 500:
                     raise ProviderIntegrationError(
