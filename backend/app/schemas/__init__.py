@@ -18,6 +18,13 @@ from app.schemas.scenario import (
 from app.schemas.forecast import (
     ForecastIntervalItem,
     ForecastResponse,
+    ForecastCreateRequest,
+    ForecastAcknowledgement,
+    ForecastIntervalRead,
+    StationForecastRead,
+    HorizonMetadata,
+    ModelProvenanceMetadata,
+    ForecastDetailRead,
 )
 from app.schemas.allocation import (
     AllocationRunRequest,
@@ -38,6 +45,18 @@ from app.schemas.health import (
     HealthResponse,
     IntegrationHealthResponse,
 )
+from app.schemas.external_feedback import (
+    AllocationIntervalInput,
+    StationAllocationFeedbackInput,
+    PredictorFeedbackCreateRequest,
+    PredictorFeedbackCreateResponse,
+    PredictorFeedbackDetailRead,
+    AdjustedDemandIntervalRead,
+    StationAdjustedDemandRead,
+    AdjustedDemandResponse,
+    ExternalPhase5FeedbackPayload,
+    map_allocation_to_external_phase5,
+)
 
 __all__ = [
     "GridGroupBase",
@@ -53,6 +72,13 @@ __all__ = [
     "ScenarioResponse",
     "ForecastIntervalItem",
     "ForecastResponse",
+    "ForecastCreateRequest",
+    "ForecastAcknowledgement",
+    "ForecastIntervalRead",
+    "StationForecastRead",
+    "HorizonMetadata",
+    "ModelProvenanceMetadata",
+    "ForecastDetailRead",
     "AllocationRunRequest",
     "StationAllocationResultSchema",
     "AllocationRunResponse",
@@ -64,4 +90,14 @@ __all__ = [
     "OperationalAdjustmentResponse",
     "HealthResponse",
     "IntegrationHealthResponse",
+    "AllocationIntervalInput",
+    "StationAllocationFeedbackInput",
+    "PredictorFeedbackCreateRequest",
+    "PredictorFeedbackCreateResponse",
+    "PredictorFeedbackDetailRead",
+    "AdjustedDemandIntervalRead",
+    "StationAdjustedDemandRead",
+    "AdjustedDemandResponse",
+    "ExternalPhase5FeedbackPayload",
+    "map_allocation_to_external_phase5",
 ]

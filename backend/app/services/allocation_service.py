@@ -60,12 +60,21 @@ class AllocationService:
         # 4. Determine demand for the requested interval
         # Check if an operational adjustment was supplied (feedback-adjusted demand)
         demand_by_station: Dict[str, Dict[str, float]] = {}
-        target_interval_start_iso = req.interval_start.isoformat()
         known_station_ids = {s.station_id for s in stations}
 
         # Enforce physical verification safeguard in live mode
         is_live_mode = (scenario.provider_mode == "live" or not settings.is_mock_provider)
         require_physical_confirmed = is_live_mode and not getattr(settings, "CONFIRM_PHYSICAL_STATION_MAPPINGS", False)
+
+        req_start = req.interval_start if req.interval_start.tzinfo is not None else req.interval_start.replace(tzinfo=timezone.utc)
+        req_start_utc = req_start.astimezone(timezone.utc)
+        req_end = req.interval_end if req.interval_end.tzinfo is not None else req.interval_end.replace(tzinfo=timezone.utc)
+        req_end_utc = req_end.astimezone(timezone.utc)
+
+        if req_start_utc >= req_end_utc:
+            raise InvalidForecastError(
+                f"Requested interval start '{req_start_utc.isoformat()}' must be strictly before interval end '{req_end_utc.isoformat()}'."
+            )
 
         if req.operational_adjustment_id:
             adj = (
@@ -75,6 +84,24 @@ class AllocationService:
             )
             if not adj:
                 raise EntityNotFoundError("OperationalAdjustment", req.operational_adjustment_id)
+
+            adj_start = adj.target_interval_start if adj.target_interval_start.tzinfo is not None else adj.target_interval_start.replace(tzinfo=timezone.utc)
+            adj_start_utc = adj_start.astimezone(timezone.utc)
+            adj_end = adj.target_interval_end if adj.target_interval_end.tzinfo is not None else adj.target_interval_end.replace(tzinfo=timezone.utc)
+            adj_end_utc = adj_end.astimezone(timezone.utc)
+
+            if adj_start_utc != req_start_utc or adj_end_utc != req_end_utc:
+                raise InvalidForecastError(
+                    f"Operational adjustment '{req.operational_adjustment_id}' target interval "
+                    f"[{adj_start_utc.isoformat()} - {adj_end_utc.isoformat()}] does not match "
+                    f"requested interval [{req_start_utc.isoformat()} - {req_end_utc.isoformat()}]."
+                )
+
+            if adj.parent_forecast_id and adj.parent_forecast_id != req.forecast_id:
+                raise InvalidForecastError(
+                    f"Operational adjustment '{req.operational_adjustment_id}' belongs to forecast '{adj.parent_forecast_id}', "
+                    f"which does not match requested forecast '{req.forecast_id}'."
+                )
 
             # Use feedback-adjusted operational demand numbers
             adj_data = json.loads(adj.station_adjustments_json)
@@ -89,18 +116,22 @@ class AllocationService:
                     "predicted_energy_kwh": item["adjusted_predicted_energy_kwh"],
                 }
         else:
-            # Match baseline forecast intervals with robust timezone handling
-            req_start = req.interval_start if req.interval_start.tzinfo is not None else req.interval_start.replace(tzinfo=timezone.utc)
+            # Match baseline forecast intervals with exact UTC matching for both start and end boundaries
             matching_items = []
             for item in forecast.intervals:
                 item_start = item.interval_start if item.interval_start.tzinfo is not None else item.interval_start.replace(tzinfo=timezone.utc)
-                if abs((item_start - req_start).total_seconds()) < 60:
+                item_start_utc = item_start.astimezone(timezone.utc)
+                item_end = item.interval_end if item.interval_end.tzinfo is not None else item.interval_end.replace(tzinfo=timezone.utc)
+                item_end_utc = item_end.astimezone(timezone.utc)
+
+                if item_start_utc == req_start_utc and item_end_utc == req_end_utc:
                     matching_items.append(item)
 
             if not matching_items:
                 raise InvalidForecastError(
-                    f"Requested interval start '{req.interval_start.isoformat()}' is outside the forecast horizon "
-                    f"for forecast '{req.forecast_id}'. Timestamps must match a valid forecast interval."
+                    f"Requested interval [{req_start_utc.isoformat()} - {req_end_utc.isoformat()}] "
+                    f"is outside the forecast horizon for forecast '{req.forecast_id}'. "
+                    f"Both start and end timestamps must exactly match a valid forecast interval."
                 )
 
             for item in matching_items:

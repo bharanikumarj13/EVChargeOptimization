@@ -1,11 +1,15 @@
+from typing import Optional
 from datetime import datetime, timezone
-from sqlalchemy import String, Float, Integer, DateTime, ForeignKey, Text
+from sqlalchemy import String, Float, Integer, DateTime, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base
 
 
 class FeedbackRecord(Base):
     __tablename__ = "feedback_records"
+    __table_args__ = (
+        UniqueConstraint("allocation_id", name="uq_feedback_records_allocation_id"),
+    )
 
     feedback_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     scenario_id: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -13,8 +17,6 @@ class FeedbackRecord(Base):
     allocation_id: Mapped[str] = mapped_column(
         String(64),
         ForeignKey("allocation_runs.allocation_id", ondelete="CASCADE"),
-        unique=True,
-        index=True,
         nullable=False,
     )
     outcome_kind: Mapped[str] = mapped_column(String(32), default="simulation", nullable=False)
@@ -24,7 +26,7 @@ class FeedbackRecord(Base):
     deferred_fraction: Mapped[float] = mapped_column(Float, default=0.70, nullable=False)
     submission_status: Mapped[str] = mapped_column(String(32), default="submitted", nullable=False)  # submitted, pending, failed
     idempotency_key: Mapped[str] = mapped_column(String(128), unique=True, index=True, nullable=False)
-    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_details: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
